@@ -43,6 +43,10 @@ func getNewTransactionId() uint64 {
 	return txSeq
 }
 
+func helloHandler(w http.ResponseWriter, req *http.Request) {
+	fmt.Fprintln(w, "Hello, world!")
+}
+
 func updateHandler(w http.ResponseWriter, req *http.Request) {
 	c := make(chan int)
 	<-c
@@ -117,11 +121,14 @@ func moveHandler(w http.ResponseWriter, req *http.Request) {
 }
 
 func main() {
+	flag.Parse()
 	go newTransaction().startGen(txChan)
-	http.Handle("/", http.HandlerFunc(updateHandler))
+	http.Handle("/", http.HandlerFunc(helloHandler))
+	http.Handle("/update", http.HandlerFunc(updateHandler))
 	http.Handle("/store", http.HandlerFunc(storeHandler))
 	http.Handle("/fetch", http.HandlerFunc(fetchHandler))
 	http.Handle("/move", http.HandlerFunc(moveHandler))
+	log.Println(*addr)
 	err := http.ListenAndServe(*addr, nil)
 	if err != nil {
 		log.Fatal("ListenAndServe:", err)

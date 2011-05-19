@@ -1,54 +1,181 @@
 package main
 
 import (
-	"fmt"
-	"http"
-	"log"
+	"bytes"
 	"flag"
-	"strconv"
+	"fmt"
+	"gob"
+	"http"
+	"io"
+	"log"
 	"os"
+	"strconv"
+	"strings"
 	redis "github.com/simonjefford/Go-Redis/src"
 )
 
 const (
 	txCounterKey = "tx.counter"
+	txListKey    = "tx.list"
+	txKeyFormat  = "tx:%d"
+	pathKey      = "path:%s"
+	hashKey      = "hash:%s"
+
+	headerPrefix    = "X-Yad-"
+	txHeader        = headerPrefix + "Last-Serial-Id"
+	dataFoundHeader = headerPrefix + "Data-Found"
+	hashHeader      = headerPrefix + "Meta-Sha256"
+)
+
+const (
+	redisReqStore = iota
+	redisReqMove
+	redisReqFetch
 )
 
 var addr = flag.String("addr", ":8080", "http service address")
-var redisClient redis.Client
 var txChan = make(chan *transactionRequest)
 
 type transaction struct {
+	redisClient redis.Client
 }
 
 type transactionRequest struct {
-	c chan int64 // Write back channel
+	kind        int      // redisReqXXX
+	resultChan  chan int // Write back result
+	w           http.ResponseWriter
+	req         *http.Request
+	queryString map[string][]string
 }
 
-func newTransactionRequest() *transactionRequest {
-	return &transactionRequest{make(chan int64)}
+func newTransactionRequest(kind int, w http.ResponseWriter, req *http.Request, queryString map[string][]string) *transactionRequest {
+	return &transactionRequest{kind, make(chan int), w, req, queryString}
 }
 
 func newTransaction() *transaction {
 	return new(transaction)
 }
 
-func (self *transaction) startGen(c chan *transactionRequest) {
-	for {
-		seq, err := redisClient.Incr(txCounterKey)
-		if err != nil {
-			log.Fatal("Incr txCounterKey:", err)
-		}
-		req := <-c
-		req.c <- seq
+func (self *transaction) incrTxCounter() (int64, os.Error) {
+	txSeq, err := self.redisClient.Incr(txCounterKey)
+	if err != nil {
+		log.Fatal("Incr txCounterKey:", err)
 	}
+	return txSeq, err
 }
 
-func getNewTransactionId() int64 {
-	txReq := newTransactionRequest()
-	txChan <- txReq
-	txSeq := <-txReq.c
-	return txSeq
+func makeS3Path(req *transactionRequest) string {
+	// TODO create real s3 path
+	return "/tmp/s3/" + req.req.Header[hashHeader][0]
+}
+
+func storeBinary(req *transactionRequest, s3path string) {
+	// TODO store to s3
+	f, err := os.OpenFile(s3path, os.O_RDWR | os.O_CREATE, 0600)
+	if err != nil {
+		log.Fatal(err)
+	}
+	n, err := io.Copy(f, req.req.Body)
+	if err != nil {
+		log.Fatal(err)
+	}
+	log.Println(n, " bytes written")
+	req.resultChan <- 0
+}
+
+func (self *transaction) store(req *transactionRequest) {
+	txSeq, _ := self.incrTxCounter()
+	log.Println("txSeq", txSeq)
+	req.w.Header().Set(txHeader, strconv.Itoa64(txSeq))
+
+	metadata := make(map[string][]string)
+	if req.req.Method == "GET" || req.req.Method == "HEAD" {
+		storedVal, err := self.redisClient.Get(
+			fmt.Sprintf(pathKey, req.req.Header[hashHeader]))
+		if err != nil {
+			log.Fatal("Get() for store:", err)
+		}
+		log.Println(storedVal)
+		if len(storedVal) == 0 {
+			req.w.Header().Set(dataFoundHeader, "no")
+		} else {
+			req.w.Header().Set(dataFoundHeader, "yes")
+		}
+		for k, v := range req.req.Header {
+			if strings.HasPrefix(k, headerPrefix) {
+				log.Println(k, v)
+				metadata[k] = v
+			}
+		}
+	} else if req.req.Method == "POST" {
+		for k, v := range req.req.Header {
+			if strings.HasPrefix(k, headerPrefix) ||
+				k == "Content-Type" {
+				log.Println(k, v)
+				metadata[k] = v
+			}
+		}
+		metadata["Content-Length"] = []string{
+			strconv.Itoa64(req.req.ContentLength)}
+		s3path := makeS3Path(req)
+		self.redisClient.Set(fmt.Sprintf(hashKey,
+						 req.req.Header[hashHeader][0]),
+				     []byte(s3path))
+		go storeBinary(req, s3path)
+	} else {
+		log.Println("Unsupported method:", req.req.Method)
+		req.w.WriteHeader(http.StatusBadRequest)
+		req.resultChan <- -1
+		return
+	}
+	var buf bytes.Buffer
+	enc := gob.NewEncoder(&buf)
+	enc.Encode(req.req.Header)
+	self.redisClient.Set(fmt.Sprintf(pathKey,
+		req.queryString["path"]),
+		buf.Bytes())
+
+	self.saveTransaction(txSeq,
+			     fmt.Sprintf("STORED\t%s", req.queryString["path"]))
+	if req.req.Method == "GET" || req.req.Method == "HEAD" {
+		// for POST, resultChan is written from storeBinary()
+		req.resultChan <- 0
+	}
+	/*
+		b := network.Bytes()
+		network2 := bytes.NewBuffer(b)
+		dec := gob.NewDecoder(network2)
+		var m map[string][]string
+		dec.Decode(&m)
+		log.Println(m)
+	*/
+}
+
+func (self *transaction) saveTransaction(txSeq int64, tx string) {
+	log.Println("saveTransaction()")
+	log.Println(fmt.Sprintf(txKeyFormat, txSeq), []uint8(tx))
+	err := self.redisClient.Set(fmt.Sprintf(txKeyFormat, txSeq), []uint8(tx))
+	if err != nil {
+		log.Fatal("redis Set():", err)
+	}
+	err = self.redisClient.Rpush(txListKey, []uint8(strconv.Itoa64(txSeq)))
+	if err != nil {
+		log.Fatal("redis Set():", err)
+	}
+	//fmt.Println(self.redisClient.Lrange(txListKey, 0, -1))
+}
+
+func (self *transaction) start(c chan *transactionRequest) {
+	self.redisClient = connectToRedis()
+	for {
+		req := <-c
+		log.Println(req, redisReqStore)
+		if req.kind == redisReqStore {
+			self.store(req)
+		} else if req.kind == redisReqMove {
+		} else if req.kind == redisReqFetch {
+		}
+	}
 }
 
 func helloHandler(w http.ResponseWriter, req *http.Request) {
@@ -88,10 +215,16 @@ func storeHandler(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 	log.Println(queryString)
-	txSeq := getNewTransactionId()
-	log.Println(txSeq)
-	// TODO do actual storing
-	w.Header().Set("X-yad-serial-id", strconv.Itoa64(txSeq))
+	if len(req.Header[hashHeader]) != 1 {
+		errMsg := "One " + hashHeader + " header should exist"
+		log.Println(errMsg)
+		w.WriteHeader(http.StatusBadRequest)
+		fmt.Fprintln(w, errMsg)
+		return
+	}
+	txReq := newTransactionRequest(redisReqStore, w, req, queryString)
+	txChan <- txReq
+	<-txReq.resultChan
 }
 
 func fetchHandler(w http.ResponseWriter, req *http.Request) {
@@ -122,32 +255,26 @@ func moveHandler(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 	log.Println(queryString)
-	txSeq := getNewTransactionId()
-	log.Println(txSeq)
 	// TODO do actual move
-	w.Header().Set("X-yad-serial-id", strconv.Itoa64(txSeq))
 }
 
-func connectToRedis() {
+func connectToRedis() redis.Client {
 	spec := redis.DefaultSpec()
-	var e os.Error
-	redisClient, e = redis.NewSynchClientWithSpec(spec)
+	redisClient, e := redis.NewSynchClientWithSpec(spec)
 	if e != nil {
 		log.Fatal("failed to create the client", e)
-		return
 	}
+	return redisClient
 }
 
 func main() {
 	flag.Parse()
-	connectToRedis()
-	go newTransaction().startGen(txChan)
+	go newTransaction().start(txChan)
 	http.Handle("/", http.HandlerFunc(helloHandler))
 	http.Handle("/update", http.HandlerFunc(updateHandler))
 	http.Handle("/store", http.HandlerFunc(storeHandler))
 	http.Handle("/fetch", http.HandlerFunc(fetchHandler))
 	http.Handle("/move", http.HandlerFunc(moveHandler))
-	log.Println(redisClient)
 	err := http.ListenAndServe(*addr, nil)
 	if err != nil {
 		log.Fatal("ListenAndServe:", err)

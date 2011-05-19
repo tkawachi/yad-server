@@ -71,7 +71,7 @@ func makeS3Path(req *transactionRequest) string {
 
 func storeBinary(req *transactionRequest, s3path string) {
 	// TODO store to s3
-	f, err := os.OpenFile(s3path, os.O_RDWR | os.O_CREATE, 0600)
+	f, err := os.OpenFile(s3path, os.O_RDWR|os.O_CREATE, 0600)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -119,8 +119,8 @@ func (self *transaction) store(req *transactionRequest) {
 			strconv.Itoa64(req.req.ContentLength)}
 		s3path := makeS3Path(req)
 		self.redisClient.Set(fmt.Sprintf(hashKey,
-						 req.req.Header[hashHeader][0]),
-				     []byte(s3path))
+			req.req.Header[hashHeader][0]),
+			[]byte(s3path))
 		go storeBinary(req, s3path)
 	} else {
 		log.Println("Unsupported method:", req.req.Method)
@@ -136,7 +136,7 @@ func (self *transaction) store(req *transactionRequest) {
 		buf.Bytes())
 
 	self.saveTransaction(txSeq,
-			     fmt.Sprintf("STORED\t%s", req.queryString["path"]))
+		fmt.Sprintf("STORED\t%s", req.queryString["path"]))
 	if req.req.Method == "GET" || req.req.Method == "HEAD" {
 		// for POST, resultChan is written from storeBinary()
 		req.resultChan <- 0

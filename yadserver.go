@@ -24,11 +24,14 @@ const (
 	txHeader        = headerPrefix + "Last-Serial-Id"
 	dataFoundHeader = headerPrefix + "Data-Found"
 	hashHeader      = headerPrefix + "Meta-Sha256"
+
+	devNull = "dev/null"
 )
 
 const (
 	redisReqStore = iota
 	redisReqMove
+	redisReqRemove
 	redisReqFetch
 	redisReqUpdate
 )
@@ -47,7 +50,9 @@ type transactionRequest struct {
 	w           http.ResponseWriter
 	req         *http.Request
 	queryString map[string][]string
-	path        string
+	path        string // set only if queryString contains a path param
+	from        string // set only if queryString contains a from param
+	to          string // set only if queryString contains a to param
 }
 
 func (self *transactionRequest) hasTxHeader() bool {
@@ -93,9 +98,19 @@ func normalizePath(path string) string {
 
 func newTransactionRequest(kind int, w http.ResponseWriter, req *http.Request, queryString map[string][]string) *transactionRequest {
 	txReq := transactionRequest{
-		kind, make(chan int), w, req, queryString, ""}
+		kind, make(chan int), w, req, queryString, "", "", ""}
+
 	if len(txReq.queryString["path"]) > 0 {
 		txReq.path = normalizePath(queryString["path"][0])
+	}
+	if len(txReq.queryString["from"]) > 0 {
+		txReq.from = normalizePath(queryString["from"][0])
+	}
+	if len(txReq.queryString["to"]) > 0 {
+		txReq.to = normalizePath(queryString["to"][0])
+		if txReq.to == devNull {
+			txReq.kind = redisReqRemove
+		}
 	}
 	return &txReq
 }
@@ -211,6 +226,37 @@ func (self *transaction) saveTransaction(txSeq int64, tx string) {
 	//fmt.Println(self.redisClient.Lrange(txListKey, 0, -1))
 }
 
+func (self *transaction) remove(req *transactionRequest) {
+	txSeq, _ := self.incrTxCounter()
+	log.Println("txSeq", txSeq)
+	req.w.Header().Set(txHeader, strconv.Itoa64(txSeq))
+
+	tobeRemovedPaths := []string{
+		req.from,
+	}
+	underPath := normalizePath(req.from + "/*")
+	result, err := self.redisClient.Keys(fmt.Sprintf(pathKey, underPath))
+	if err != nil {
+		log.Fatal("redis Keys():", err)
+	}
+	for _, v := range result {
+		tobeRemovedPaths = append(tobeRemovedPaths, v)
+	}
+
+	log.Println("tobeRemovedPaths:", tobeRemovedPaths)
+
+	for _, p := range tobeRemovedPaths {
+		_, err := self.redisClient.Del(fmt.Sprintf(pathKey, p))
+		if err != nil {
+			log.Fatal(err)
+		}
+	}
+
+	txContent := fmt.Sprintf("MOVED\t%s\t%s", req.from, devNull)
+	self.saveTransaction(txSeq, txContent)
+	req.resultChan <- 0
+}
+
 func (self *transaction) fetch(req *transactionRequest) {
 	txSeq, _ := self.curTxCounter()
 	log.Println("txSeq", txSeq)
@@ -219,6 +265,12 @@ func (self *transaction) fetch(req *transactionRequest) {
 	b, err := self.redisClient.Get(fmt.Sprintf(pathKey, req.path))
 	if err != nil {
 		log.Fatal(err)
+	}
+	if len(b) <= 0 {
+		log.Println("No path entry for", req.path)
+		req.w.WriteHeader(http.StatusNotFound)
+		req.resultChan <- 0
+		return
 	}
 	log.Println("bytes to decode", b)
 	buf := bytes.NewBuffer(b)
@@ -288,6 +340,9 @@ func (self *transaction) start(c chan *transactionRequest) {
 		if req.kind == redisReqStore {
 			self.store(req)
 		} else if req.kind == redisReqMove {
+			// TODO impl
+		} else if req.kind == redisReqRemove {
+			self.remove(req)
 		} else if req.kind == redisReqFetch {
 			self.fetch(req)
 		} else if req.kind == redisReqUpdate {
@@ -371,7 +426,9 @@ func moveHandler(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 	log.Println(queryString)
-	// TODO do actual move
+	txReq := newTransactionRequest(redisReqMove, w, req, queryString)
+	txChan <- txReq
+	<-txReq.resultChan
 }
 
 func connectToRedis() redis.Client {

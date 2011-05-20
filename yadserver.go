@@ -10,7 +10,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
-	redis "github.com/simonjefford/Go-Redis/src"
+	"redis"
 )
 
 const (
@@ -232,9 +232,10 @@ func (self *transaction) remove(req *transactionRequest) {
 	req.w.Header().Set(txHeader, strconv.Itoa64(txSeq))
 
 	tobeRemovedPaths := []string{
-		req.from,
+		fmt.Sprintf(pathKey, req.from),
 	}
 	underPath := normalizePath(req.from + "/*")
+	log.Println(fmt.Sprintf(pathKey, underPath))
 	result, err := self.redisClient.Keys(fmt.Sprintf(pathKey, underPath))
 	if err != nil {
 		log.Fatal("redis Keys():", err)
@@ -243,10 +244,8 @@ func (self *transaction) remove(req *transactionRequest) {
 		tobeRemovedPaths = append(tobeRemovedPaths, v)
 	}
 
-	log.Println("tobeRemovedPaths:", tobeRemovedPaths)
-
 	for _, p := range tobeRemovedPaths {
-		_, err := self.redisClient.Del(fmt.Sprintf(pathKey, p))
+		_, err := self.redisClient.Del(p)
 		if err != nil {
 			log.Fatal(err)
 		}

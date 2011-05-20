@@ -226,6 +226,17 @@ func (self *transaction) saveTransaction(txSeq int64, tx string) {
 	//fmt.Println(self.redisClient.Lrange(txListKey, 0, -1))
 }
 
+func (self *transaction) move(req *transactionRequest) {
+	txSeq, _ := self.incrTxCounter()
+	log.Println("txSeq", txSeq)
+	req.w.Header().Set(txHeader, strconv.Itoa64(txSeq))
+	// TODO impl MOVE
+
+	txContent := fmt.Sprintf("MOVED\t%s\t%s", req.from, req.to)
+	self.saveTransaction(txSeq, txContent)
+	req.resultChan <- 0
+}
+
 func (self *transaction) remove(req *transactionRequest) {
 	txSeq, _ := self.incrTxCounter()
 	log.Println("txSeq", txSeq)
@@ -339,7 +350,7 @@ func (self *transaction) start(c chan *transactionRequest) {
 		if req.kind == redisReqStore {
 			self.store(req)
 		} else if req.kind == redisReqMove {
-			// TODO impl
+			self.move(req)
 		} else if req.kind == redisReqRemove {
 			self.remove(req)
 		} else if req.kind == redisReqFetch {

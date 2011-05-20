@@ -6,7 +6,7 @@ import (
 	"os"
 )
 
-func serveS3 ( s3path string, req *transactionRequest) {
+func serveS3(s3path string, req *transactionRequest) {
 	// TODO fetch from s3
 	log.Println("Serving", s3path)
 	f, err := os.OpenFile(s3path, os.O_RDONLY, 0600)

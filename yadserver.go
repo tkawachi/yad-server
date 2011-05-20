@@ -46,13 +46,13 @@ type transactionRequest struct {
 	w           http.ResponseWriter
 	req         *http.Request
 	queryString map[string][]string
-	path string
+	path        string
 }
 
 type metadata struct {
-	Headers map[string][]string
+	Headers       map[string][]string
 	ContentLength int64
-	Hash string
+	Hash          string
 }
 
 func newMetadata() *metadata {
@@ -90,6 +90,14 @@ func (self *transaction) incrTxCounter() (int64, os.Error) {
 		log.Fatal("Incr txCounterKey:", err)
 	}
 	return txSeq, err
+}
+
+func (self *transaction) curTxCounter() (int64, os.Error) {
+	txSeq, err := self.redisClient.Get(txCounterKey)
+	if err != nil {
+		log.Fatal("Current txCounterKey:", err)
+	}
+	return strconv.Atoi64(string(txSeq))
 }
 
 func makeS3Path(req *transactionRequest) string {
@@ -166,7 +174,7 @@ func (self *transaction) store(req *transactionRequest) {
 
 	txContent := fmt.Sprintf("STORED\t%s", req.path)
 	self.saveTransaction(txSeq, txContent)
-	updateNotiChan <- &updateNotification{ txSeq, txContent }
+	updateNotiChan <- &updateNotification{txSeq, txContent}
 	req.resultChan <- 0
 }
 
@@ -185,6 +193,10 @@ func (self *transaction) saveTransaction(txSeq int64, tx string) {
 }
 
 func (self *transaction) fetch(req *transactionRequest) {
+	txSeq, _ := self.curTxCounter()
+	log.Println("txSeq", txSeq)
+	req.w.Header().Set(txHeader, strconv.Itoa64(txSeq))
+
 	b, err := self.redisClient.Get(fmt.Sprintf(pathKey, req.path))
 	if err != nil {
 		log.Fatal(err)
@@ -198,8 +210,8 @@ func (self *transaction) fetch(req *transactionRequest) {
 		log.Fatal(e)
 	}
 	log.Println("decoded metadata", md)
-	for k, v := range(md.Headers) {
-		for _, v2 := range(v) {
+	for k, v := range md.Headers {
+		for _, v2 := range v {
 			req.w.Header().Set(k, v2)
 		}
 	}

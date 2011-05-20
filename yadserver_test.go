@@ -6,13 +6,13 @@ import (
 
 func TestNormalizePath(t *testing.T) {
 	testCase := map[string]string{
-		"":        "",
-		"a":       "a",
-		"ab":      "ab",
-		"/ab":     "ab",
-		"a//":     "a/",
-		"/ab//":   "ab/",
-		"/ab///c": "ab/c",
+		"":         "",
+		"a":        "a",
+		"ab":       "ab",
+		"/ab":      "ab",
+		"a//":      "a/",
+		"/ab//":    "ab/",
+		"/ab///c":  "ab/c",
 		"//ab///c": "ab/c",
 	}
 	for k, v := range testCase {

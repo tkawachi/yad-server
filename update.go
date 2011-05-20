@@ -25,7 +25,7 @@ func updateRoutine(chClient chan *updateClient, chNotification chan *updateNotif
 		case noti := <-chNotification:
 			for _, cli := range clientList {
 				fmt.Fprintf(cli.w, "%d\t%s\n",
-					     noti.txSeq, noti.content)
+					noti.txSeq, noti.content)
 				cli.ch <- 0
 			}
 			// XXX thread unsafe ?

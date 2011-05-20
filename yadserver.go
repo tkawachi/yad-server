@@ -30,6 +30,7 @@ const (
 	redisReqStore = iota
 	redisReqMove
 	redisReqFetch
+	redisReqUpdate
 )
 
 var txChan = make(chan *transactionRequest)
@@ -47,6 +48,22 @@ type transactionRequest struct {
 	req         *http.Request
 	queryString map[string][]string
 	path        string
+}
+
+func (self *transactionRequest)hasTxHeader() bool {
+	return len(self.req.Header[txHeader]) > 0
+}
+
+func (self *transactionRequest)getTxHeader() int64 {
+	if !self.hasTxHeader() {
+		return -1
+	}
+	i, err := strconv.Atoi64(self.req.Header[txHeader][0])
+	if err != nil {
+		log.Println(err)
+		return -1
+	}
+	return i
 }
 
 type metadata struct {
@@ -75,9 +92,12 @@ func normalizePath(path string) string {
 }
 
 func newTransactionRequest(kind int, w http.ResponseWriter, req *http.Request, queryString map[string][]string) *transactionRequest {
-	return &transactionRequest{
-		kind, make(chan int), w, req, queryString,
-		normalizePath(queryString["path"][0])}
+	txReq := transactionRequest{
+		kind, make(chan int), w, req, queryString, ""}
+	if len(txReq.queryString["path"]) > 0 {
+		txReq.path = normalizePath(queryString["path"][0])
+	}
+	return &txReq
 }
 
 func newTransaction() *transaction {
@@ -229,6 +249,38 @@ func (self *transaction) fetch(req *transactionRequest) {
 	}
 }
 
+func (self *transaction) update(req *transactionRequest) {
+	l, err := self.redisClient.Lrange(txListKey, 0, -1)
+	if err != nil {
+		log.Fatal(err)
+	}
+	isWroteContents := false
+	for _, x := range l {
+		k := string(x)
+		seq, e := strconv.Atoi64(k)
+		if e != nil {
+			log.Println(k, "can't be converted to int64")
+			continue
+		}
+		if req.getTxHeader() < seq {
+			contents, err := self.redisClient.Get(
+				fmt.Sprintf(txKeyFormat, seq))
+			if err != nil {
+				log.Fatal(err)
+			}
+			fmt.Fprintf(req.w, "%d\t%s\n", seq, string(contents))
+			log.Println("Send client:", string(contents))
+			isWroteContents = true
+		}
+	}
+	if isWroteContents {
+		req.resultChan <- 0
+	} else {
+		cli := updateClient{req.w, req.req, req.resultChan}
+		updateCliChan <- &cli
+	}
+}
+
 func (self *transaction) start(c chan *transactionRequest) {
 	self.redisClient = connectToRedis()
 	for {
@@ -239,6 +291,8 @@ func (self *transaction) start(c chan *transactionRequest) {
 		} else if req.kind == redisReqMove {
 		} else if req.kind == redisReqFetch {
 			self.fetch(req)
+		} else if req.kind == redisReqUpdate {
+			self.update(req)
 		}
 	}
 }
@@ -248,9 +302,14 @@ func helloHandler(w http.ResponseWriter, req *http.Request) {
 }
 
 func updateHandler(w http.ResponseWriter, req *http.Request) {
-	cli := updateClient{w, req, make(chan int)}
-	updateCliChan <- &cli
-	<-cli.ch
+	queryString, err := parseQuery(w, req, []string{})
+	if err != nil {
+		return
+	}
+	log.Println(queryString)
+	txReq := newTransactionRequest(redisReqUpdate, w, req, queryString)
+	txChan <- txReq
+	<-txReq.resultChan
 }
 
 func parseQuery(w http.ResponseWriter, req *http.Request, requiredParam []string) (queryString map[string][]string, err os.Error) {

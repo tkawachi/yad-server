@@ -50,11 +50,11 @@ type transactionRequest struct {
 	path        string
 }
 
-func (self *transactionRequest)hasTxHeader() bool {
+func (self *transactionRequest) hasTxHeader() bool {
 	return len(self.req.Header[txHeader]) > 0
 }
 
-func (self *transactionRequest)getTxHeader() int64 {
+func (self *transactionRequest) getTxHeader() int64 {
 	if !self.hasTxHeader() {
 		return -1
 	}
@@ -147,7 +147,7 @@ func (self *transaction) store(req *transactionRequest) {
 	md.Hash = req.req.Header[hashHeader][0]
 	if req.req.Method == "GET" || req.req.Method == "HEAD" {
 		storedVal, err := self.redisClient.Get(
-			fmt.Sprintf(pathKey, req.req.Header[hashHeader]))
+			fmt.Sprintf(hashKey, md.Hash))
 		if err != nil {
 			log.Fatal("Get() for store:", err)
 		}
@@ -173,8 +173,7 @@ func (self *transaction) store(req *transactionRequest) {
 		}
 		md.ContentLength = req.req.ContentLength
 		s3path := makeS3Path(req)
-		self.redisClient.Set(fmt.Sprintf(hashKey,
-			req.req.Header[hashHeader][0]),
+		self.redisClient.Set(fmt.Sprintf(hashKey, md.Hash),
 			[]byte(s3path))
 	} else {
 		log.Println("Unsupported method:", req.req.Method)

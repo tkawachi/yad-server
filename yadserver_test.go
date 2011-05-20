@@ -16,7 +16,7 @@ func TestNormalizePath(t *testing.T) {
 		"//ab///c": "ab/c",
 	}
 	for k, v := range testCase {
-		p := NormalizePath(k)
+		p := normalizePath(k)
 		if p != v {
 			t.Error(p, "should be", v, "(", k, ")")
 		}

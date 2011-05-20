@@ -46,13 +46,13 @@ type transactionRequest struct {
 	queryString map[string][]string
 }
 
-func NormalizePath(path string) string {
+// Normalize path to store on the metadata DB
+func normalizePath(path string) string {
 	for len(path) > 0 && path[0] == '/' {
 		path = path[1:]
 	}
 	for {
 		new_path := strings.Replace(path, "//", "/", -1)
-		log.Println(new_path, path)
 		if new_path == path {
 			break
 		}

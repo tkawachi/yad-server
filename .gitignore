@@ -1,2 +1,9 @@
 yad-server
 _go_.*
+_testmain.*
+_gotest_.*
+*.out
+*.swp
+_obj
+_test
+/cmd/yadserver

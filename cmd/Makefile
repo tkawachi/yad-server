@@ -2,6 +2,6 @@ include $(GOROOT)/src/Make.inc
 
 TARG=yadserver
 GOFILES=\
-	yadserver.go\
+	main.go\
 
-include $(GOROOT)/src/Make.pkg
+include $(GOROOT)/src/Make.cmd

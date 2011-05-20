@@ -1,8 +1,7 @@
-package main
+package yadserver
 
 import (
 	"bytes"
-	"flag"
 	"fmt"
 	"gob"
 	"http"
@@ -33,7 +32,6 @@ const (
 	redisReqFetch
 )
 
-var addr = flag.String("addr", ":8080", "http service address")
 var txChan = make(chan *transactionRequest)
 
 type transaction struct {
@@ -46,6 +44,21 @@ type transactionRequest struct {
 	w           http.ResponseWriter
 	req         *http.Request
 	queryString map[string][]string
+}
+
+func NormalizePath(path string) string {
+	for len(path) > 0 && path[0] == '/' {
+		path = path[1:]
+	}
+	for {
+		new_path := strings.Replace(path, "//", "/", -1)
+		log.Println(new_path, path)
+		if new_path == path {
+			break
+		}
+		path = new_path
+	}
+	return path
 }
 
 func newTransactionRequest(kind int, w http.ResponseWriter, req *http.Request, queryString map[string][]string) *transactionRequest {
@@ -267,15 +280,14 @@ func connectToRedis() redis.Client {
 	return redisClient
 }
 
-func main() {
-	flag.Parse()
+func Start(addr string) {
 	go newTransaction().start(txChan)
 	http.Handle("/", http.HandlerFunc(helloHandler))
 	http.Handle("/update", http.HandlerFunc(updateHandler))
 	http.Handle("/store", http.HandlerFunc(storeHandler))
 	http.Handle("/fetch", http.HandlerFunc(fetchHandler))
 	http.Handle("/move", http.HandlerFunc(moveHandler))
-	err := http.ListenAndServe(*addr, nil)
+	err := http.ListenAndServe(addr, nil)
 	if err != nil {
 		log.Fatal("ListenAndServe:", err)
 	}

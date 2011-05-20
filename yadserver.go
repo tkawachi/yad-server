@@ -33,6 +33,8 @@ const (
 )
 
 var txChan = make(chan *transactionRequest)
+var updateCliChan = make(chan *updateClient)
+var updateNotiChan = make(chan *updateNotification)
 
 type transaction struct {
 	redisClient redis.Client
@@ -44,6 +46,17 @@ type transactionRequest struct {
 	w           http.ResponseWriter
 	req         *http.Request
 	queryString map[string][]string
+	path string
+}
+
+type metadata struct {
+	Headers map[string][]string
+	ContentLength int64
+	Hash string
+}
+
+func newMetadata() *metadata {
+	return &metadata{make(map[string][]string), 0, ""}
 }
 
 // Normalize path to store on the metadata DB
@@ -62,7 +75,9 @@ func normalizePath(path string) string {
 }
 
 func newTransactionRequest(kind int, w http.ResponseWriter, req *http.Request, queryString map[string][]string) *transactionRequest {
-	return &transactionRequest{kind, make(chan int), w, req, queryString}
+	return &transactionRequest{
+		kind, make(chan int), w, req, queryString,
+		normalizePath(queryString["path"][0])}
 }
 
 func newTransaction() *transaction {
@@ -84,7 +99,7 @@ func makeS3Path(req *transactionRequest) string {
 
 func storeBinary(req *transactionRequest, s3path string) {
 	// TODO store to s3
-	f, err := os.OpenFile(s3path, os.O_RDWR|os.O_CREATE, 0600)
+	f, err := os.OpenFile(s3path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -93,7 +108,6 @@ func storeBinary(req *transactionRequest, s3path string) {
 		log.Fatal(err)
 	}
 	log.Println(n, " bytes written")
-	req.resultChan <- 0
 }
 
 func (self *transaction) store(req *transactionRequest) {
@@ -101,7 +115,8 @@ func (self *transaction) store(req *transactionRequest) {
 	log.Println("txSeq", txSeq)
 	req.w.Header().Set(txHeader, strconv.Itoa64(txSeq))
 
-	metadata := make(map[string][]string)
+	md := newMetadata()
+	md.Hash = req.req.Header[hashHeader][0]
 	if req.req.Method == "GET" || req.req.Method == "HEAD" {
 		storedVal, err := self.redisClient.Get(
 			fmt.Sprintf(pathKey, req.req.Header[hashHeader]))
@@ -117,7 +132,7 @@ func (self *transaction) store(req *transactionRequest) {
 		for k, v := range req.req.Header {
 			if strings.HasPrefix(k, headerPrefix) {
 				log.Println(k, v)
-				metadata[k] = v
+				md.Headers[k] = v
 			}
 		}
 	} else if req.req.Method == "POST" {
@@ -125,16 +140,14 @@ func (self *transaction) store(req *transactionRequest) {
 			if strings.HasPrefix(k, headerPrefix) ||
 				k == "Content-Type" {
 				log.Println(k, v)
-				metadata[k] = v
+				md.Headers[k] = v
 			}
 		}
-		metadata["Content-Length"] = []string{
-			strconv.Itoa64(req.req.ContentLength)}
+		md.ContentLength = req.req.ContentLength
 		s3path := makeS3Path(req)
 		self.redisClient.Set(fmt.Sprintf(hashKey,
 			req.req.Header[hashHeader][0]),
 			[]byte(s3path))
-		go storeBinary(req, s3path)
 	} else {
 		log.Println("Unsupported method:", req.req.Method)
 		req.w.WriteHeader(http.StatusBadRequest)
@@ -143,25 +156,18 @@ func (self *transaction) store(req *transactionRequest) {
 	}
 	var buf bytes.Buffer
 	enc := gob.NewEncoder(&buf)
-	enc.Encode(req.req.Header)
-	self.redisClient.Set(fmt.Sprintf(pathKey,
-		req.queryString["path"]),
+	e := enc.Encode(md)
+	if e != nil {
+		log.Fatal(e)
+	}
+	log.Println("encoded metadata", md)
+	self.redisClient.Set(fmt.Sprintf(pathKey, req.path),
 		buf.Bytes())
 
-	self.saveTransaction(txSeq,
-		fmt.Sprintf("STORED\t%s", req.queryString["path"]))
-	if req.req.Method == "GET" || req.req.Method == "HEAD" {
-		// for POST, resultChan is written from storeBinary()
-		req.resultChan <- 0
-	}
-	/*
-		b := network.Bytes()
-		network2 := bytes.NewBuffer(b)
-		dec := gob.NewDecoder(network2)
-		var m map[string][]string
-		dec.Decode(&m)
-		log.Println(m)
-	*/
+	txContent := fmt.Sprintf("STORED\t%s", req.path)
+	self.saveTransaction(txSeq, txContent)
+	updateNotiChan <- &updateNotification{ txSeq, txContent }
+	req.resultChan <- 0
 }
 
 func (self *transaction) saveTransaction(txSeq int64, tx string) {
@@ -178,6 +184,39 @@ func (self *transaction) saveTransaction(txSeq int64, tx string) {
 	//fmt.Println(self.redisClient.Lrange(txListKey, 0, -1))
 }
 
+func (self *transaction) fetch(req *transactionRequest) {
+	b, err := self.redisClient.Get(fmt.Sprintf(pathKey, req.path))
+	if err != nil {
+		log.Fatal(err)
+	}
+	log.Println("bytes to decode", b)
+	buf := bytes.NewBuffer(b)
+	dec := gob.NewDecoder(buf)
+	var md metadata
+	e := dec.Decode(&md)
+	if e != nil {
+		log.Fatal(e)
+	}
+	log.Println("decoded metadata", md)
+	for k, v := range(md.Headers) {
+		for _, v2 := range(v) {
+			req.w.Header().Set(k, v2)
+		}
+	}
+
+	if req.req.Method == "GET" {
+		b, err = self.redisClient.Get(fmt.Sprintf(hashKey, md.Hash))
+		if err != nil {
+			log.Fatal(err)
+		}
+		s3path := string(b)
+		log.Println(s3path)
+		go serveS3(s3path, req)
+	} else {
+		req.resultChan <- 0
+	}
+}
+
 func (self *transaction) start(c chan *transactionRequest) {
 	self.redisClient = connectToRedis()
 	for {
@@ -187,6 +226,7 @@ func (self *transaction) start(c chan *transactionRequest) {
 			self.store(req)
 		} else if req.kind == redisReqMove {
 		} else if req.kind == redisReqFetch {
+			self.fetch(req)
 		}
 	}
 }
@@ -196,8 +236,9 @@ func helloHandler(w http.ResponseWriter, req *http.Request) {
 }
 
 func updateHandler(w http.ResponseWriter, req *http.Request) {
-	c := make(chan int)
-	<-c
+	cli := updateClient{w, req, make(chan int)}
+	updateCliChan <- &cli
+	<-cli.ch
 }
 
 func parseQuery(w http.ResponseWriter, req *http.Request, requiredParam []string) (queryString map[string][]string, err os.Error) {
@@ -210,7 +251,7 @@ func parseQuery(w http.ResponseWriter, req *http.Request, requiredParam []string
 		return
 	}
 	for _, param := range requiredParam {
-		if queryString[param] == nil {
+		if queryString[param] == nil || len(queryString[param]) == 0 {
 			errMsg := param + " parameter is required"
 			log.Println(errMsg)
 			w.WriteHeader(http.StatusBadRequest)
@@ -236,6 +277,8 @@ func storeHandler(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 	txReq := newTransactionRequest(redisReqStore, w, req, queryString)
+	s3path := makeS3Path(txReq)
+	storeBinary(txReq, s3path)
 	txChan <- txReq
 	<-txReq.resultChan
 }
@@ -247,19 +290,9 @@ func fetchHandler(w http.ResponseWriter, req *http.Request) {
 	}
 	log.Println(queryString)
 	// TODO do actual metadata fetch
-	metadata := map[string]string{
-		"Metadata1": "abc",
-		"Metadata2": "def",
-	}
-	for key, value := range metadata {
-		w.Header().Set("X-yad-"+key, value)
-	}
-	if req.Method == "HEAD" {
-		return
-	} else if req.Method == "GET" {
-		// TODO do actual fetch
-		fmt.Fprintln(w, "abc")
-	}
+	txReq := newTransactionRequest(redisReqFetch, w, req, queryString)
+	txChan <- txReq
+	<-txReq.resultChan
 }
 
 func moveHandler(w http.ResponseWriter, req *http.Request) {
@@ -282,6 +315,7 @@ func connectToRedis() redis.Client {
 
 func Start(addr string) {
 	go newTransaction().start(txChan)
+	go updateRoutine(updateCliChan, updateNotiChan)
 	http.Handle("/", http.HandlerFunc(helloHandler))
 	http.Handle("/update", http.HandlerFunc(updateHandler))
 	http.Handle("/store", http.HandlerFunc(storeHandler))
